@@ -1,4 +1,4 @@
-# Azure Document Intelligence - Layout Model Streamlit App
+# Layout-aware Intelligent Summarization Agent (LISA)
 
 This Streamlit application allows you to upload documents and extract structured information using Azure AI Document Intelligence Layout model. The app outputs the analysis results as JSON.
 
