@@ -1,5 +1,5 @@
 streamlit>=1.28.0
-azure-ai-documentintelligence>=1.0.0
+azure-ai-formrecognizer>=3.3.0
 azure-identity>=1.14.0
 azure-core>=1.28.0
 python-dotenv>=1.0.0

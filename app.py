@@ -1,367 +1,257 @@
 import streamlit as st
-import os
 import json
-import tempfile
-from typing import Optional, Dict, Any
-from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.core.credentials import AzureKeyCredential
-from azure.identity import DefaultAzureCredential
-import logging
-from dotenv import load_dotenv
+from utils import extract_data, DocumentIntelligenceError
 
-# Load environment variables from .env file if it exists
-load_dotenv()
+st.title("📄 Azure AI Document Intelligence Analyzer")
+st.markdown("Upload a PDF document to extract comprehensive information using Azure AI Document Intelligence.")
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Supported file types by Azure Document Intelligence
-SUPPORTED_EXTENSIONS = {
-    'pdf': 'application/pdf',
-    'jpg': 'image/jpeg',
-    'jpeg': 'image/jpeg', 
-    'png': 'image/png',
-    'bmp': 'image/bmp',
-    'tiff': 'image/tiff',
-    'heif': 'image/heif',
-    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-    'html': 'text/html'
-}
-
-class DocumentIntelligenceProcessor:
-    """
-    Azure Document Intelligence processor using the Layout model.
-    Implements secure authentication with managed identity and proper error handling.
-    """
+# Configuration section
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    st.markdown("### Azure Document Intelligence Settings")
     
-    def __init__(self, endpoint: str, credential_type: str = "managed_identity"):
-        """
-        Initialize the Document Intelligence client.
-        
-        Args:
-            endpoint: Azure Document Intelligence endpoint
-            credential_type: Authentication method ('managed_identity' or 'key')
-        """
-        self.endpoint = endpoint
-        self.credential_type = credential_type
-        self.client = self._create_client()
-    
-    def _create_client(self) -> DocumentIntelligenceClient:
-        """
-        Create Document Intelligence client with appropriate authentication.
-        
-        Returns:
-            Configured DocumentIntelligenceClient
-        """
-        try:
-            if self.credential_type == "managed_identity":
-                # Use DefaultAzureCredential for managed identity (recommended)
-                credential = DefaultAzureCredential()
-                logger.info("Using managed identity authentication")
-            else:
-                # Fallback to key-based authentication (for development only)
-                api_key = os.getenv("DOCUMENT_INTELLIGENCE_KEY")
-                if not api_key:
-                    raise ValueError("DOCUMENT_INTELLIGENCE_KEY environment variable not set")
-                credential = AzureKeyCredential(api_key)
-                logger.info("Using key-based authentication")
-            
-            return DocumentIntelligenceClient(
-                endpoint=self.endpoint,
-                credential=credential
-            )
-        except Exception as e:
-            logger.error(f"Failed to create Document Intelligence client: {str(e)}")
-            raise
-    
-    def analyze_document(self, file_content: bytes, content_type: str) -> Dict[str, Any]:
-        """
-        Analyze document using Layout model with retry logic and error handling.
-        
-        Args:
-            file_content: Binary content of the file
-            content_type: MIME type of the file
-            
-        Returns:
-            Dictionary containing the analysis results
-        """
-        max_retries = 3
-        retry_count = 0
-        
-        while retry_count < max_retries:
-            try:
-                logger.info(f"Starting document analysis (attempt {retry_count + 1})")
-                  # Start the analysis operation
-                poller = self.client.begin_analyze_document(
-                    model_id="prebuilt-layout",
-                    body=file_content,
-                    content_type=content_type
-                )
-                
-                # Wait for completion
-                result = poller.result()
-                
-                logger.info("Document analysis completed successfully")
-                
-                # Convert result to dictionary for JSON serialization
-                return self._convert_result_to_dict(result)
-                
-            except Exception as e:
-                retry_count += 1
-                logger.warning(f"Analysis attempt {retry_count} failed: {str(e)}")
-                
-                if retry_count >= max_retries:
-                    logger.error(f"All retry attempts failed. Final error: {str(e)}")
-                    raise
-                
-                # Exponential backoff
-                import time
-                time.sleep(2 ** retry_count)
-    
-    def _convert_result_to_dict(self, result) -> Dict[str, Any]:
-        """
-        Convert Azure Document Intelligence result to a JSON-serializable dictionary.
-        
-        Args:
-            result: AnalyzeResult object from Azure Document Intelligence
-            
-        Returns:
-            Dictionary representation of the result
-        """
-        try:
-            # Extract key information from the result
-            output = {
-                "model_id": result.model_id if hasattr(result, 'model_id') else None,
-                "api_version": result.api_version if hasattr(result, 'api_version') else None,
-                "content": result.content if hasattr(result, 'content') else None,
-                "pages": [],
-                "tables": [],
-                "paragraphs": [],
-                "styles": []
-            }
-            
-            # Extract pages information
-            if hasattr(result, 'pages') and result.pages:
-                for page in result.pages:
-                    page_info = {
-                        "page_number": page.page_number if hasattr(page, 'page_number') else None,
-                        "width": page.width if hasattr(page, 'width') else None,
-                        "height": page.height if hasattr(page, 'height') else None,
-                        "unit": page.unit if hasattr(page, 'unit') else None,
-                        "lines": []
-                    }
-                    
-                    # Extract lines from page
-                    if hasattr(page, 'lines') and page.lines:
-                        for line in page.lines:
-                            line_info = {
-                                "content": line.content if hasattr(line, 'content') else None,
-                                "bounding_regions": []
-                            }
-                            
-                            # Extract bounding regions
-                            if hasattr(line, 'bounding_regions') and line.bounding_regions:
-                                for region in line.bounding_regions:
-                                    region_info = {
-                                        "page_number": region.page_number if hasattr(region, 'page_number') else None,
-                                        "polygon": [{"x": point.x, "y": point.y} for point in region.polygon] if hasattr(region, 'polygon') else []
-                                    }
-                                    line_info["bounding_regions"].append(region_info)
-                            
-                            page_info["lines"].append(line_info)
-                    
-                    output["pages"].append(page_info)
-            
-            # Extract tables information
-            if hasattr(result, 'tables') and result.tables:
-                for table in result.tables:
-                    table_info = {
-                        "row_count": table.row_count if hasattr(table, 'row_count') else None,
-                        "column_count": table.column_count if hasattr(table, 'column_count') else None,
-                        "cells": []
-                    }
-                    
-                    # Extract table cells
-                    if hasattr(table, 'cells') and table.cells:
-                        for cell in table.cells:
-                            cell_info = {
-                                "content": cell.content if hasattr(cell, 'content') else None,
-                                "row_index": cell.row_index if hasattr(cell, 'row_index') else None,
-                                "column_index": cell.column_index if hasattr(cell, 'column_index') else None,
-                                "row_span": cell.row_span if hasattr(cell, 'row_span') else 1,
-                                "column_span": cell.column_span if hasattr(cell, 'column_span') else 1
-                            }
-                            table_info["cells"].append(cell_info)
-                    
-                    output["tables"].append(table_info)
-            
-            # Extract paragraphs information
-            if hasattr(result, 'paragraphs') and result.paragraphs:
-                for paragraph in result.paragraphs:
-                    paragraph_info = {
-                        "content": paragraph.content if hasattr(paragraph, 'content') else None,
-                        "role": paragraph.role if hasattr(paragraph, 'role') else None
-                    }
-                    output["paragraphs"].append(paragraph_info)
-            
-            return output
-            
-        except Exception as e:
-            logger.error(f"Error converting result to dictionary: {str(e)}")
-            # Return basic structure with error information
-            return {
-                "error": f"Failed to process result: {str(e)}",
-                "raw_content": str(result) if result else None
-            }
-
-def main():
-    """Main Streamlit application"""
-    st.set_page_config(
-        page_title="Azure Document Intelligence - Layout Model",
-        page_icon="📄",
-        layout="wide"
+    endpoint = st.text_input(
+        "Document Intelligence Endpoint",
+        help="Your Azure Document Intelligence endpoint URL",
+        placeholder="https://your-resource.cognitiveservices.azure.com/"
     )
     
-    st.title("📄 Azure Document Intelligence - Layout Model")
-    st.markdown("Upload documents to extract structured information using Azure AI Document Intelligence Layout model")
+    use_key_auth = st.checkbox(
+        "Use API Key Authentication", 
+        help="Check this if you want to use API key instead of managed identity"
+    )
     
-    # Sidebar for configuration
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-        
-        # Azure Document Intelligence endpoint
-        endpoint = st.text_input(
-            "Azure Document Intelligence Endpoint",
-            value=os.getenv("DOCUMENT_INTELLIGENCE_ENDPOINT", ""),
-            help="Your Azure Document Intelligence service endpoint URL"
+    api_key = None
+    if use_key_auth:
+        api_key = st.text_input(
+            "API Key", 
+            type="password",
+            help="Your Azure Document Intelligence API key"
         )
-        
-        # Authentication method selection
-        auth_method = st.selectbox(
-            "Authentication Method",
-            ["managed_identity", "key"],
-            help="Choose authentication method. Managed Identity is recommended for production."
-        )
-        
-        if auth_method == "key":
-            st.warning("⚠️ Key-based authentication should only be used for development. Use environment variable DOCUMENT_INTELLIGENCE_KEY.")
-        
-        st.markdown("---")
-        st.markdown("### Supported File Types")
-        st.markdown("- **Documents**: PDF")
-        st.markdown("- **Images**: JPG, PNG, BMP, TIFF, HEIF")
-        st.markdown("- **Office**: DOCX, XLSX, PPTX")
-        st.markdown("- **Web**: HTML")
-    
-    # Main content area
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.header("📤 Upload Document")
-        
-        # File uploader
-        uploaded_file = st.file_uploader(
-            "Choose a file",
-            type=list(SUPPORTED_EXTENSIONS.keys()),
-            help="Upload a document supported by Azure Document Intelligence"
-        )
-        
-        if uploaded_file is not None:
-            # Display file information
-            st.success(f"✅ File uploaded: {uploaded_file.name}")
-            st.info(f"📊 File size: {len(uploaded_file.getvalue())} bytes")
-            
-            # Get file extension and content type
-            file_extension = uploaded_file.name.split('.')[-1].lower()
-            content_type = SUPPORTED_EXTENSIONS.get(file_extension)
-            
-            if content_type:
-                st.info(f"🔍 Content type: {content_type}")
-                
-                # Process button
-                if st.button("🚀 Analyze Document", type="primary"):
-                    if not endpoint:
-                        st.error("❌ Please provide the Azure Document Intelligence endpoint in the sidebar")
-                        return
-                    
-                    try:
-                        # Show progress
-                        with st.spinner("🔄 Analyzing document with Azure Document Intelligence..."):
-                            # Initialize processor
-                            processor = DocumentIntelligenceProcessor(
-                                endpoint=endpoint,
-                                credential_type=auth_method
-                            )
-                            
-                            # Analyze document
-                            file_content = uploaded_file.getvalue()
-                            result = processor.analyze_document(file_content, content_type)
-                            
-                            # Store result in session state
-                            st.session_state.analysis_result = result
-                            st.session_state.filename = uploaded_file.name
-                        
-                        st.success("✅ Document analysis completed!")
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error analyzing document: {str(e)}")
-                        logger.error(f"Document analysis failed: {str(e)}")
-            else:
-                st.error(f"❌ Unsupported file type: {file_extension}")
-    
-    with col2:
-        st.header("📋 Analysis Results")
-        
-        # Display results if available
-        if hasattr(st.session_state, 'analysis_result'):
-            result = st.session_state.analysis_result
-            filename = st.session_state.filename
-            
-            # Results summary
-            st.subheader("📊 Summary")
-            
-            # Count extracted elements
-            pages_count = len(result.get('pages', []))
-            tables_count = len(result.get('tables', []))
-            paragraphs_count = len(result.get('paragraphs', []))
-            
-            col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                st.metric("Pages", pages_count)
-            with col_b:
-                st.metric("Tables", tables_count)
-            with col_c:
-                st.metric("Paragraphs", paragraphs_count)
-            
-            # Display extracted content preview
-            if result.get('content'):
-                st.subheader("📄 Extracted Text (Preview)")
-                preview_text = result['content'][:500] + "..." if len(result['content']) > 500 else result['content']
-                st.text_area("Content Preview", preview_text, height=150, disabled=True)
-            
-            # JSON download
-            st.subheader("💾 Download Results")
-            
-            # Format JSON for download
-            json_str = json.dumps(result, indent=2, ensure_ascii=False)
-            
-            st.download_button(
-                label="📥 Download JSON Results",
-                data=json_str,
-                file_name=f"{filename}_analysis_result.json",
-                mime="application/json",
-                type="primary"
-            )
-            
-            # Display JSON in expandable section
-            with st.expander("🔍 View Full JSON Results", expanded=False):
-                st.json(result)
-        
-        else:
-            st.info("👈 Upload and analyze a document to see results here")
 
-if __name__ == "__main__":
-    main()
+# Main content area
+uploaded_file = st.file_uploader(
+    "Upload a PDF document", 
+    type=['pdf'],
+    help="Select a PDF file to analyze with Azure AI Document Intelligence"
+)
+
+if uploaded_file is not None:
+    st.success(f"✅ File uploaded: {uploaded_file.name}")
+    
+    # File information
+    file_size = len(uploaded_file.getvalue())
+    st.info(f"📊 File size: {file_size / 1024:.1f} KB")
+    
+    if st.button("🚀 Analyze Document", type="primary"):
+        try:
+            with st.spinner("🔍 Analyzing document with Azure AI Document Intelligence..."):
+                # Extract data using the utils function
+                result = extract_data(
+                    uploaded_file=uploaded_file,
+                    endpoint=endpoint if endpoint else None,
+                    use_key_credential=use_key_auth,
+                    api_key=api_key if use_key_auth else None
+                )
+            
+            st.success("✅ Document analysis completed!")
+            
+            # Display results in organized tabs
+            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                "📋 Summary", "📝 Content", "🧮 Formulas", "📊 Tables", "🗂️ Structure", "📐 Technical Details"
+            ])
+            
+            with tab1:
+                st.header("📋 Document Summary")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Pages", result['document_metadata']['total_pages'])
+                with col2:
+                    st.metric("Paragraphs", len(result['paragraphs']))
+                with col3:
+                    st.metric("Formulas", len(result['formulas']))
+                with col4:
+                    st.metric("Tables", len(result['tables']))
+                
+                # Confidence scores
+                if result['confidence_scores']['average_paragraph_confidence']:
+                    st.subheader("🎯 Confidence Scores")
+                    conf_col1, conf_col2, conf_col3 = st.columns(3)
+                    with conf_col1:
+                        avg_para_conf = result['confidence_scores']['average_paragraph_confidence']
+                        st.metric("Avg Paragraph Confidence", f"{avg_para_conf:.2%}")
+                    with conf_col2:
+                        if result['confidence_scores']['average_table_confidence']:
+                            avg_table_conf = result['confidence_scores']['average_table_confidence']
+                            st.metric("Avg Table Confidence", f"{avg_table_conf:.2%}")
+                    with conf_col3:
+                        if result['confidence_scores']['average_formula_confidence']:
+                            avg_formula_conf = result['confidence_scores']['average_formula_confidence']
+                            st.metric("Avg Formula Confidence", f"{avg_formula_conf:.2%}")
+            
+            with tab2:
+                st.header("📝 Document Content")
+                
+                # Headers by level
+                if result['headers']:
+                    st.subheader("🏷️ Headers Structure")
+                    for level, headers in result['headers'].items():
+                        with st.expander(f"{level.upper()} Headers ({len(headers)} found)"):
+                            for i, header in enumerate(headers, 1):
+                                confidence_text = f" (Confidence: {header['confidence']:.2%})" if header['confidence'] else ""
+                                st.write(f"**{i}.** {header['content']}{confidence_text}")
+                
+                # Paragraphs
+                if result['paragraphs']:
+                    st.subheader("📄 Paragraphs")
+                    for i, para in enumerate(result['paragraphs'][:10], 1):  # Show first 10
+                        role_text = f" *[{para['role']}]*" if para['role'] else ""
+                        confidence_text = f" (Confidence: {para['confidence']:.2%})" if para['confidence'] else ""
+                        st.write(f"**Paragraph {i}**{role_text}{confidence_text}")
+                        st.write(para['content'])
+                        st.divider()
+                    
+                    if len(result['paragraphs']) > 10:
+                        st.info(f"Showing first 10 paragraphs. Total: {len(result['paragraphs'])}")
+            
+            with tab3:
+                st.header("🧮 Mathematical Formulas")
+                
+                if result['formulas']:
+                    for i, formula in enumerate(result['formulas'], 1):
+                        confidence_text = f" (Confidence: {formula['confidence']:.2%})" if formula['confidence'] else ""
+                        kind_text = f" *[{formula['kind']}]*" if formula['kind'] else ""
+                        st.write(f"**Formula {i}**{kind_text}{confidence_text}")
+                        st.code(formula['content'])
+                        if formula['bounding_regions']:
+                            pages = [str(region['page_number']) for region in formula['bounding_regions']]
+                            st.caption(f"Found on page(s): {', '.join(pages)}")
+                        st.divider()
+                else:
+                    st.info("No formulas detected in the document.")
+            
+            with tab4:
+                st.header("📊 Tables")
+                
+                if result['tables']:
+                    for i, table in enumerate(result['tables'], 1):
+                        confidence_text = f" (Confidence: {table['confidence']:.2%})" if table['confidence'] else ""
+                        st.write(f"**Table {i}**{confidence_text}")
+                        st.write(f"Dimensions: {table['row_count']} rows × {table['column_count']} columns")
+                        
+                        # Create a displayable table from cells
+                        if table['cells']:
+                            # Initialize table matrix
+                            table_matrix = [["" for _ in range(table['column_count'])] for _ in range(table['row_count'])]
+                            
+                            # Fill the matrix with cell content
+                            for cell in table['cells']:
+                                if cell['row_index'] < table['row_count'] and cell['column_index'] < table['column_count']:
+                                    table_matrix[cell['row_index']][cell['column_index']] = cell['content']
+                            
+                            # Display the table
+                            st.table(table_matrix)
+                        
+                        st.divider()
+                else:
+                    st.info("No tables detected in the document.")
+            
+            with tab5:
+                st.header("🗂️ Document Structure")
+                
+                # Key-value pairs
+                if result['key_value_pairs']:
+                    st.subheader("🔑 Key-Value Pairs")
+                    for kv in result['key_value_pairs'][:20]:  # Show first 20
+                        confidence_text = f" (Confidence: {kv['confidence']:.2%})" if kv['confidence'] else ""
+                        st.write(f"**{kv['key']}:** {kv['value']}{confidence_text}")
+                    
+                    if len(result['key_value_pairs']) > 20:
+                        st.info(f"Showing first 20 key-value pairs. Total: {len(result['key_value_pairs'])}")
+                
+                # Page information
+                if result['pages']:
+                    st.subheader("📄 Page Details")
+                    for page in result['pages']:
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric(f"Page {page['page_number']} - Width", f"{page['width']:.1f}")
+                        with col2:
+                            st.metric("Height", f"{page['height']:.1f}")
+                        with col3:
+                            st.metric("Lines", page['lines_count'])
+                        with col4:
+                            st.metric("Words", page['words_count'])
+            
+            with tab6:
+                st.header("📐 Technical Details")
+                
+                # Document metadata
+                st.subheader("📊 Document Metadata")
+                metadata = result['document_metadata']
+                st.json({
+                    "Model ID": metadata['model_id'],
+                    "File Name": metadata['file_name'],
+                    "File Size (bytes)": metadata['file_size_bytes'],
+                    "Total Pages": metadata['total_pages'],
+                    "Content Length": metadata['content_length']
+                })
+                
+                # Bounding boxes summary
+                if result['bounding_boxes']:
+                    st.subheader("📦 Bounding Boxes Summary")
+                    st.write(f"Total bounding boxes detected: {len(result['bounding_boxes'])}")
+                    
+                    # Show sample bounding boxes
+                    with st.expander("View Sample Bounding Boxes"):
+                        for i, bbox in enumerate(result['bounding_boxes'][:5], 1):
+                            st.write(f"**Element {i}** ({bbox['element_type']})")
+                            st.write(f"Page: {bbox['page_number']}, Content: {bbox['content'][:100]}...")
+                
+                # Raw data download
+                st.subheader("💾 Download Raw Data")
+                st.download_button(
+                    label="📥 Download Full Analysis Results (JSON)",
+                    data=json.dumps(result, indent=2, default=str),
+                    file_name=f"analysis_{uploaded_file.name.replace('.pdf', '')}.json",
+                    mime="application/json"
+                )
+                
+        except DocumentIntelligenceError as e:
+            st.error(f"❌ Document Intelligence Error: {str(e)}")
+            st.info("💡 Please check your Azure configuration and try again.")
+        
+        except Exception as e:
+            st.error(f"❌ Unexpected Error: {str(e)}")
+            st.info("💡 Please check your configuration and try again.")
+
+else:
+    st.info("👆 Please upload a PDF document to begin analysis.")
+    
+    # Help section
+    with st.expander("ℹ️ How to use this application"):
+        st.markdown("""
+        ### Setup Instructions:
+        1. **Azure Document Intelligence Resource**: Create an Azure Document Intelligence resource in the Azure portal
+        2. **Get Endpoint**: Copy the endpoint URL from your resource
+        3. **Authentication**: Choose between:
+           - **Managed Identity** (recommended for production): Ensure you're authenticated with Azure CLI
+           - **API Key**: Get the key from your Azure resource and enter it in the sidebar
+        
+        ### What this application extracts:
+        - 📝 **Paragraphs**: All text content with role classification
+        - 🏷️ **Headers**: Organized by hierarchy levels (H1, H2, etc.)
+        - 🧮 **Formulas**: Mathematical expressions and equations
+        - 📊 **Tables**: Structured data with rows and columns
+        - 🔑 **Key-Value Pairs**: Detected form fields
+        - 📦 **Bounding Boxes**: Coordinate information for all elements
+        - 📄 **Page Information**: Dimensions and content statistics
+        
+        ### Supported Features:
+        - ✅ High-resolution analysis
+        - ✅ Formula detection
+        - ✅ Multi-page documents
+        - ✅ PDF validation
+        - ✅ Comprehensive error handling
+        """)
